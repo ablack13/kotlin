@@ -6,6 +6,7 @@
 package org.jetbrains.kotlin.codegen.coroutines
 
 import org.jetbrains.kotlin.codegen.inline.insnOpcodeText
+import org.jetbrains.kotlin.codegen.inline.nodeText
 import org.jetbrains.kotlin.codegen.optimization.common.MethodAnalyzer
 import org.jetbrains.kotlin.resolve.jvm.AsmTypes
 import org.jetbrains.org.objectweb.asm.Opcodes.*
@@ -14,6 +15,7 @@ import org.jetbrains.org.objectweb.asm.tree.*
 import org.jetbrains.org.objectweb.asm.tree.analysis.Frame
 import org.jetbrains.org.objectweb.asm.tree.analysis.Interpreter
 import org.jetbrains.org.objectweb.asm.tree.analysis.Value
+import java.lang.IllegalStateException
 
 // BasicValue interpreter from ASM does not distinct 'int' types from other int-like types like 'byte' or 'boolean',
 // neither do HotSpot and JVM spec.
@@ -21,6 +23,19 @@ import org.jetbrains.org.objectweb.asm.tree.analysis.Value
 // so this function calculates refined frames' markup.
 // Note that type of some values is only possible to determine by their usages (e.g. ICONST_1, BALOAD both may push boolean or byte on stack)
 // In this case, update the type of the value.
+
+private class DebugInfo(val containingClassInternalName: String, val methodNode: MethodNode) {
+    override fun toString(): String = "class: $containingClassInternalName\n${methodNode.nodeText}"
+}
+
+private var startingTimeMillis: Long = 0
+private var debugInfo: DebugInfo? = null
+
+private fun checkAndThrow() {
+    if (System.currentTimeMillis() - startingTimeMillis > 60_000) {
+        throw IllegalStateException("Timeout at $debugInfo")
+    }
+}
 
 // StrictBasicValue with mutable type
 internal open class SpilledVariableFieldTypeValue(open var type: Type?, val insn: AbstractInsnNode?) : Value {
@@ -69,8 +84,10 @@ internal val NULL_TYPE = Type.getObjectType("null")
 private class SpilledVariableFieldTypesInterpreter(
     private val methodNode: MethodNode
 ) : Interpreter<SpilledVariableFieldTypeValue>(API_VERSION) {
-    override fun newValue(type: Type?): SpilledVariableFieldTypeValue? =
-        if (type == Type.VOID_TYPE) null else SpilledVariableFieldTypeValue(type, null)
+    override fun newValue(type: Type?): SpilledVariableFieldTypeValue? {
+        checkAndThrow()
+        return if (type == Type.VOID_TYPE) null else SpilledVariableFieldTypeValue(type, null)
+    }
 
     // INVOKEVIRTUAL, INVOKESPECIAL, INVOKESTATIC, INVOKEINTERFACE,
     // MULTIANEWARRAY and INVOKEDYNAMIC
@@ -78,6 +95,7 @@ private class SpilledVariableFieldTypesInterpreter(
         insn: AbstractInsnNode,
         values: MutableList<out SpilledVariableFieldTypeValue?>
     ): SpilledVariableFieldTypeValue? {
+        checkAndThrow()
         fun updateTypes(argTypes: Array<Type>, withReceiver: Boolean) {
             val offset = if (withReceiver) 1 else 0
             for ((index, argType) in argTypes.withIndex()) {
@@ -131,6 +149,7 @@ private class SpilledVariableFieldTypesInterpreter(
         index: SpilledVariableFieldTypeValue?,
         value: SpilledVariableFieldTypeValue?
     ): SpilledVariableFieldTypeValue? {
+        checkAndThrow()
         when (insn.opcode) {
             IASTORE, LASTORE, FASTORE, DASTORE, AASTORE -> {
                 // nothing to do
@@ -149,23 +168,27 @@ private class SpilledVariableFieldTypesInterpreter(
         return null
     }
 
-    override fun merge(v: SpilledVariableFieldTypeValue?, w: SpilledVariableFieldTypeValue?): SpilledVariableFieldTypeValue? = when {
-        v?.type?.isIntType() == true && w?.type?.isIntType() == true -> v + w
-        v != null && v.type == null -> w
-        w != null && w.type == null -> v
-        v?.type == w?.type -> v
-        v?.type?.sort == Type.OBJECT && w?.type?.sort == Type.OBJECT -> {
-            when {
-                v.type == AsmTypes.OBJECT_TYPE -> v
-                w.type == AsmTypes.OBJECT_TYPE -> w
-                else -> SpilledVariableFieldTypeValue(AsmTypes.OBJECT_TYPE, v.insn)
+    override fun merge(v: SpilledVariableFieldTypeValue?, w: SpilledVariableFieldTypeValue?): SpilledVariableFieldTypeValue? {
+        checkAndThrow()
+        return when {
+            v?.type?.isIntType() == true && w?.type?.isIntType() == true -> v + w
+            v != null && v.type == null -> w
+            w != null && w.type == null -> v
+            v?.type == w?.type -> v
+            v?.type?.sort == Type.OBJECT && w?.type?.sort == Type.OBJECT -> {
+                when {
+                    v.type == AsmTypes.OBJECT_TYPE -> v
+                    w.type == AsmTypes.OBJECT_TYPE -> w
+                    else -> SpilledVariableFieldTypeValue(AsmTypes.OBJECT_TYPE, v.insn)
+                }
             }
+            else -> SpilledVariableFieldTypeValue(null, v?.insn ?: w?.insn)
         }
-        else -> SpilledVariableFieldTypeValue(null, v?.insn ?: w?.insn)
     }
 
     // IRETURN, LRETURN, FRETURN, DRETURN, ARETURN
     override fun returnOperation(insn: AbstractInsnNode, value: SpilledVariableFieldTypeValue?, expected: SpilledVariableFieldTypeValue?) {
+        checkAndThrow()
         if (insn.opcode == IRETURN) {
             value?.type = expected?.type
         }
@@ -176,8 +199,9 @@ private class SpilledVariableFieldTypesInterpreter(
     // TABLESWITCH, LOOKUPSWITCH, IRETURN, LRETURN, FRETURN, DRETURN, ARETURN,
     // PUTSTATIC, GETFIELD, NEWARRAY, ANEWARRAY, ARRAYLENGTH, ATHROW, CHECKCAST,
     // INSTANCEOF, MONITORENTER, MONITOREXIT, IFNULL, IFNONNULL
-    override fun unaryOperation(insn: AbstractInsnNode, value: SpilledVariableFieldTypeValue?): SpilledVariableFieldTypeValue? =
-        when (insn.opcode) {
+    override fun unaryOperation(insn: AbstractInsnNode, value: SpilledVariableFieldTypeValue?): SpilledVariableFieldTypeValue? {
+        checkAndThrow()
+        return when (insn.opcode) {
             INEG, LNEG, FNEG, DNEG, IINC -> SpilledVariableFieldTypeValue(value?.type, insn)
             I2L, F2L, D2L -> SpilledVariableFieldTypeValue(Type.LONG_TYPE, insn)
             I2F, L2F, D2F -> SpilledVariableFieldTypeValue(Type.FLOAT_TYPE, insn)
@@ -212,6 +236,7 @@ private class SpilledVariableFieldTypesInterpreter(
             INSTANCEOF -> SpilledVariableFieldTypeValue(Type.BOOLEAN_TYPE, insn)
             else -> unreachable(insn)
         }
+    }
 
     // IALOAD, LALOAD, FALOAD, DALOAD, AALOAD, BALOAD, CALOAD, SALOAD, IADD,
     // LADD, FADD, DADD, ISUB, LSUB, FSUB, DSUB, IMUL, LMUL, FMUL, DMUL, IDIV,
@@ -223,8 +248,9 @@ private class SpilledVariableFieldTypesInterpreter(
         insn: AbstractInsnNode,
         v: SpilledVariableFieldTypeValue?,
         w: SpilledVariableFieldTypeValue?
-    ): SpilledVariableFieldTypeValue? =
-        when (insn.opcode) {
+    ): SpilledVariableFieldTypeValue? {
+        checkAndThrow()
+        return when (insn.opcode) {
             IALOAD, IADD, ISUB, IMUL, IDIV, IREM, ISHL, ISHR, IUSHR, IAND, IOR, IXOR, LCMP, FCMPL, FCMPG, DCMPL,
             DCMPG -> SpilledVariableFieldTypeValue(Type.INT_TYPE, insn)
             LALOAD, LADD, LSUB, LMUL, LDIV, LREM, LSHL, LSHR, LUSHR, LAND, LOR, LXOR -> SpilledVariableFieldTypeValue(Type.LONG_TYPE, insn)
@@ -244,10 +270,12 @@ private class SpilledVariableFieldTypesInterpreter(
             }
             else -> unreachable(insn)
         }
+    }
 
     // ILOAD, LLOAD, FLOAD, DLOAD, ALOAD, ISTORE, LSTORE, FSTORE, DSTORE,
     // ASTORE, DUP, DUP_X1, DUP_X2, DUP2, DUP2_X1, DUP2_X2, SWAP
     override fun copyOperation(insn: AbstractInsnNode, value: SpilledVariableFieldTypeValue?): SpilledVariableFieldTypeValue? {
+        checkAndThrow()
         return when (insn.opcode) {
             // If same ICONST is stored into several slots, thay can have different types
             // For example,
@@ -293,32 +321,38 @@ private class SpilledVariableFieldTypesInterpreter(
     // ACONST_NULL, ICONST_M1, ICONST_0, ICONST_1, ICONST_2, ICONST_3, ICONST_4,
     // ICONST_5, LCONST_0, LCONST_1, FCONST_0, FCONST_1, FCONST_2, DCONST_0,
     // DCONST_1, BIPUSH, SIPUSH, LDC, JSR, GETSTATIC, NEW
-    override fun newOperation(insn: AbstractInsnNode): SpilledVariableFieldTypeValue? = when (insn.opcode) {
-        ACONST_NULL -> SpilledVariableFieldTypeValue(NULL_TYPE, insn)
-        ICONST_M1, ICONST_0, ICONST_1, ICONST_2, ICONST_3, ICONST_4, ICONST_5 -> SpilledVariableFieldTypeValue(Type.INT_TYPE, insn)
-        LCONST_0, LCONST_1 -> SpilledVariableFieldTypeValue(Type.LONG_TYPE, insn)
-        FCONST_0, FCONST_1, FCONST_2 -> SpilledVariableFieldTypeValue(Type.FLOAT_TYPE, insn)
-        DCONST_0, DCONST_1 -> SpilledVariableFieldTypeValue(Type.DOUBLE_TYPE, insn)
-        BIPUSH -> SpilledVariableFieldTypeValue(Type.BYTE_TYPE, insn)
-        SIPUSH -> SpilledVariableFieldTypeValue(Type.SHORT_TYPE, insn)
-        LDC -> when (val cst = (insn as LdcInsnNode).cst) {
-            is Int -> SpilledVariableFieldTypeValue(Type.INT_TYPE, insn)
-            is Long -> SpilledVariableFieldTypeValue(Type.LONG_TYPE, insn)
-            is Float -> SpilledVariableFieldTypeValue(Type.FLOAT_TYPE, insn)
-            is Double -> SpilledVariableFieldTypeValue(Type.DOUBLE_TYPE, insn)
-            is String -> SpilledVariableFieldTypeValue(AsmTypes.JAVA_STRING_TYPE, insn)
-            is Type -> SpilledVariableFieldTypeValue(AsmTypes.JAVA_CLASS_TYPE, insn)
-            else -> SpilledVariableFieldTypeValue(AsmTypes.OBJECT_TYPE, insn)
+    override fun newOperation(insn: AbstractInsnNode): SpilledVariableFieldTypeValue? {
+        checkAndThrow()
+        return when (insn.opcode) {
+            ACONST_NULL -> SpilledVariableFieldTypeValue(NULL_TYPE, insn)
+            ICONST_M1, ICONST_0, ICONST_1, ICONST_2, ICONST_3, ICONST_4, ICONST_5 -> SpilledVariableFieldTypeValue(Type.INT_TYPE, insn)
+            LCONST_0, LCONST_1 -> SpilledVariableFieldTypeValue(Type.LONG_TYPE, insn)
+            FCONST_0, FCONST_1, FCONST_2 -> SpilledVariableFieldTypeValue(Type.FLOAT_TYPE, insn)
+            DCONST_0, DCONST_1 -> SpilledVariableFieldTypeValue(Type.DOUBLE_TYPE, insn)
+            BIPUSH -> SpilledVariableFieldTypeValue(Type.BYTE_TYPE, insn)
+            SIPUSH -> SpilledVariableFieldTypeValue(Type.SHORT_TYPE, insn)
+            LDC -> when (val cst = (insn as LdcInsnNode).cst) {
+                is Int -> SpilledVariableFieldTypeValue(Type.INT_TYPE, insn)
+                is Long -> SpilledVariableFieldTypeValue(Type.LONG_TYPE, insn)
+                is Float -> SpilledVariableFieldTypeValue(Type.FLOAT_TYPE, insn)
+                is Double -> SpilledVariableFieldTypeValue(Type.DOUBLE_TYPE, insn)
+                is String -> SpilledVariableFieldTypeValue(AsmTypes.JAVA_STRING_TYPE, insn)
+                is Type -> SpilledVariableFieldTypeValue(AsmTypes.JAVA_CLASS_TYPE, insn)
+                else -> SpilledVariableFieldTypeValue(AsmTypes.OBJECT_TYPE, insn)
+            }
+            JSR -> SpilledVariableFieldTypeValue(Type.VOID_TYPE, insn)
+            GETSTATIC -> SpilledVariableFieldTypeValue(Type.getType((insn as FieldInsnNode).desc), insn)
+            NEW -> SpilledVariableFieldTypeValue(Type.getObjectType((insn as TypeInsnNode).desc), insn)
+            else -> unreachable(insn)
         }
-        JSR -> SpilledVariableFieldTypeValue(Type.VOID_TYPE, insn)
-        GETSTATIC -> SpilledVariableFieldTypeValue(Type.getType((insn as FieldInsnNode).desc), insn)
-        NEW -> SpilledVariableFieldTypeValue(Type.getObjectType((insn as TypeInsnNode).desc), insn)
-        else -> unreachable(insn)
     }
 }
 
 internal fun performSpilledVariableFieldTypesAnalysis(
     methodNode: MethodNode,
     thisName: String
-): Array<out Frame<SpilledVariableFieldTypeValue>?> =
-    MethodAnalyzer(thisName, methodNode, SpilledVariableFieldTypesInterpreter(methodNode)).analyze()
+): Array<out Frame<SpilledVariableFieldTypeValue>?> {
+    startingTimeMillis = System.currentTimeMillis()
+    debugInfo = DebugInfo(thisName, methodNode)
+    return MethodAnalyzer(thisName, methodNode, SpilledVariableFieldTypesInterpreter(methodNode)).analyze()
+}
